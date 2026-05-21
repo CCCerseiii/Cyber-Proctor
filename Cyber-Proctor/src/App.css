@@ -22,6 +22,7 @@
   z-index: 1;
 }
 
+/* 全屏抖动：由 React 状态 isShaking 为 true 时在 <main> 上加 class="shake-effect" */
 .shake-effect {
   animation: screen-shake 0.14s ease-in-out infinite;
 }

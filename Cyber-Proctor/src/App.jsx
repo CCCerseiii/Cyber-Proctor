@@ -11,6 +11,8 @@ const OFFICER_PATROL_SRC = `${import.meta.env.BASE_URL}officer_patrol.mp4`
 const OFFICER_SHOOT_SRC = `${import.meta.env.BASE_URL}officer_shoot.mp4`
 const SILENT_WAV =
   'data:audio/wav;base64,UklGRigAAABXQVZFZm10IBIAAAABAAEARKwAAIhYAQACABAAAABkYXRhAgAAAAEA'
+/** 仅延迟：枪声 + 屏幕抖动（与举枪视频解耦） */
+const PUNISHMENT_DELAY_MS = 1800
 
 function isAbortLikeError(err) {
   if (!err) return false
@@ -28,11 +30,20 @@ function App() {
   const lastPredictionAtRef = useRef(0)
   const gunshotAudioRef = useRef(null)
   const audioContextRef = useRef(null)
-  const prevPhoneDetectedRef = useRef(false)
-  const prevPhoneForOfficerRef = useRef(false)
+  /** 上一帧模型是否判为「有手机」，用于上升沿 */
+  const prevPhoneRef = useRef(false)
+  /** 已安排处决延迟计时器；等待期内不因 phone 闪烁而取消 */
+  const executionPendingRef = useRef(false)
+  /** 延迟结束后再允许 shoot 视频正常结束回到 patrol（防止短于延迟时长的卡死） */
+  const punishmentDoneRef = useRef(false)
+  /** 一次处决后需先出现「无手机」再允许下一次触发 */
+  const disarmUntilPhoneClearRef = useRef(false)
   const officerBgVideoRef = useRef(null)
+  const punishmentDelayTimeoutRef = useRef(null)
 
   const [isMonitoring, setIsMonitoring] = useState(false)
+  /** 全屏抖动：仅由该状态驱动 CSS .shake-effect，与 status 解耦 */
+  const [isShaking, setIsShaking] = useState(false)
   const [status, setStatus] = useState('patrol')
   const [cameraReady, setCameraReady] = useState(false)
   const [modelReady, setModelReady] = useState(false)
@@ -58,15 +69,29 @@ function App() {
     audio.preload = 'auto'
     gunshotAudioRef.current = audio
 
-    prevPhoneDetectedRef.current = false
-    prevPhoneForOfficerRef.current = false
+    prevPhoneRef.current = false
+    executionPendingRef.current = false
+    punishmentDoneRef.current = false
+    disarmUntilPhoneClearRef.current = false
+    setIsShaking(false)
     setIsMonitoring(true)
+  }
+
+  const clearPunishmentDelayTimer = () => {
+    if (punishmentDelayTimeoutRef.current) {
+      clearTimeout(punishmentDelayTimeoutRef.current)
+      punishmentDelayTimeoutRef.current = null
+    }
   }
 
   const handleStopMonitoring = () => {
     if (!isMonitoring) return
-    prevPhoneDetectedRef.current = false
-    prevPhoneForOfficerRef.current = false
+    clearPunishmentDelayTimer()
+    executionPendingRef.current = false
+    punishmentDoneRef.current = false
+    disarmUntilPhoneClearRef.current = false
+    setIsShaking(false)
+    prevPhoneRef.current = false
     setStatus('patrol')
     const audio = gunshotAudioRef.current
     if (audio) {
@@ -253,32 +278,57 @@ function App() {
 
   useEffect(() => {
     if (!isMonitoring || !cameraReady || !modelReady) {
-      prevPhoneDetectedRef.current = phoneDetected
+      clearPunishmentDelayTimer()
+      executionPendingRef.current = false
+      punishmentDoneRef.current = false
+      disarmUntilPhoneClearRef.current = false
+      prevPhoneRef.current = false
+      queueMicrotask(() => {
+        setIsShaking(false)
+      })
       return
     }
 
-    const risingEdge = phoneDetected && !prevPhoneDetectedRef.current
-    if (!risingEdge) {
-      prevPhoneDetectedRef.current = phoneDetected
-      return
-    }
-
-    prevPhoneDetectedRef.current = phoneDetected
-    const audio = gunshotAudioRef.current
-    if (!audio) return
-    audio.currentTime = 0
-    audio.play().catch(() => {})
-  }, [phoneDetected, isMonitoring, cameraReady, modelReady])
-
-  useEffect(() => {
     if (!phoneDetected) {
-      prevPhoneForOfficerRef.current = false
+      disarmUntilPhoneClearRef.current = false
+    }
+
+    const risingEdge = phoneDetected && !prevPhoneRef.current
+    prevPhoneRef.current = phoneDetected
+
+    const canArm =
+      risingEdge &&
+      !executionPendingRef.current &&
+      status === 'patrol' &&
+      !disarmUntilPhoneClearRef.current
+
+    if (!canArm) {
       return
     }
-    const edge = !prevPhoneForOfficerRef.current
-    prevPhoneForOfficerRef.current = true
-    if (edge) setStatus('shoot')
-  }, [phoneDetected])
+
+    executionPendingRef.current = true
+    punishmentDoneRef.current = false
+    setIsShaking(false)
+    setStatus('shoot')
+
+    clearPunishmentDelayTimer()
+    punishmentDelayTimeoutRef.current = window.setTimeout(() => {
+      punishmentDelayTimeoutRef.current = null
+      executionPendingRef.current = false
+      punishmentDoneRef.current = true
+      disarmUntilPhoneClearRef.current = true
+
+      setIsShaking(true)
+      const audio = gunshotAudioRef.current
+      if (audio) {
+        audio.volume = 1
+        audio.currentTime = 0
+        void audio.play().catch(() => {})
+      }
+    }, PUNISHMENT_DELAY_MS)
+  }, [phoneDetected, isMonitoring, cameraReady, modelReady, status])
+
+  useEffect(() => () => clearPunishmentDelayTimer(), [])
 
   useEffect(() => {
     const v = officerBgVideoRef.current
@@ -286,12 +336,28 @@ function App() {
     void v.play().catch(() => {})
   }, [status])
 
-  const handleOfficerShootEnded = () => setStatus('patrol')
+  const handleOfficerShootEnded = () => {
+    if (!punishmentDoneRef.current) {
+      const v = officerBgVideoRef.current
+      if (v) {
+        v.currentTime = 0
+        void v.play().catch(() => {})
+      }
+      return
+    }
+    setStatus('patrol')
+    setIsShaking(false)
+    punishmentDoneRef.current = false
+  }
 
   const showCornerMonitoring =
     isMonitoring && cameraReady && modelReady && !phoneDetected && !cameraError && !modelError
   const showPhoneBanner = phoneDetected && cameraReady && modelReady
-  const mainClassName = ['app', showPhoneBanner ? 'app--phone-alert' : '', status === 'shoot' ? 'shake-effect' : '']
+  const mainClassName = [
+    'app',
+    showPhoneBanner ? 'app--phone-alert' : '',
+    isShaking ? 'shake-effect' : '',
+  ]
     .filter(Boolean)
     .join(' ')
 
