@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import * as tf from '@tensorflow/tfjs'
 import * as cocoSsd from '@tensorflow-models/coco-ssd'
 import './App.css'
@@ -11,13 +11,24 @@ const OFFICER_PATROL_SRC = `${import.meta.env.BASE_URL}officer_patrol.mp4`
 const OFFICER_SHOOT_SRC = `${import.meta.env.BASE_URL}officer_shoot.mp4`
 const SILENT_WAV =
   'data:audio/wav;base64,UklGRigAAABXQVZFZm10IBIAAAABAAEARKwAAIhYAQACABAAAABkYXRhAgAAAAEA'
-/** 仅延迟：枪声 + 屏幕抖动（与举枪视频解耦） */
 const PUNISHMENT_DELAY_MS = 1800
+const DEFAULT_COUNTDOWN_SEC = 25 * 60
 
 function isAbortLikeError(err) {
   if (!err) return false
   if (err.name === 'AbortError') return true
   return /aborted|abort/i.test(String(err.message || ''))
+}
+
+function formatClockTime(date = new Date()) {
+  return date.toLocaleTimeString('zh-CN', { hour12: false })
+}
+
+function formatDuration(seconds) {
+  const h = Math.floor(seconds / 3600)
+  const m = Math.floor((seconds % 3600) / 60)
+  const s = seconds % 60
+  return [h, m, s].map((n) => String(n).padStart(2, '0')).join(':')
 }
 
 function App() {
@@ -30,19 +41,20 @@ function App() {
   const lastPredictionAtRef = useRef(0)
   const gunshotAudioRef = useRef(null)
   const audioContextRef = useRef(null)
-  /** 上一帧模型是否判为「有手机」，用于上升沿 */
   const prevPhoneRef = useRef(false)
-  /** 已安排处决延迟计时器；等待期内不因 phone 闪烁而取消 */
   const executionPendingRef = useRef(false)
-  /** 延迟结束后再允许 shoot 视频正常结束回到 patrol（防止短于延迟时长的卡死） */
   const punishmentDoneRef = useRef(false)
-  /** 一次处决后需先出现「无手机」再允许下一次触发 */
   const disarmUntilPhoneClearRef = useRef(false)
   const officerBgVideoRef = useRef(null)
   const punishmentDelayTimeoutRef = useRef(null)
 
-  const [isMonitoring, setIsMonitoring] = useState(false)
-  /** 全屏抖动：仅由该状态驱动 CSS .shake-effect，与 status 解耦 */
+  const [focusMode, setFocusMode] = useState('countdown')
+  const [isFocusing, setIsFocusing] = useState(false)
+  const [countdownRemaining, setCountdownRemaining] = useState(DEFAULT_COUNTDOWN_SEC)
+  const [elapsedSeconds, setElapsedSeconds] = useState(0)
+  const [violationCount, setViolationCount] = useState(0)
+  const [logs, setLogs] = useState([])
+
   const [isShaking, setIsShaking] = useState(false)
   const [status, setStatus] = useState('patrol')
   const [cameraReady, setCameraReady] = useState(false)
@@ -51,8 +63,37 @@ function App() {
   const [cameraError, setCameraError] = useState('')
   const [modelError, setModelError] = useState('')
 
-  const handleStartMonitoring = () => {
-    if (isMonitoring) return
+  const clearPunishmentDelayTimer = useCallback(() => {
+    if (punishmentDelayTimeoutRef.current) {
+      clearTimeout(punishmentDelayTimeoutRef.current)
+      punishmentDelayTimeoutRef.current = null
+    }
+  }, [])
+
+  const resetPunishmentState = useCallback(() => {
+    clearPunishmentDelayTimer()
+    executionPendingRef.current = false
+    punishmentDoneRef.current = false
+    disarmUntilPhoneClearRef.current = false
+    prevPhoneRef.current = false
+    setIsShaking(false)
+    setStatus('patrol')
+    const audio = gunshotAudioRef.current
+    if (audio) {
+      audio.pause()
+      audio.currentTime = 0
+    }
+  }, [clearPunishmentDelayTimer])
+
+  const handleEndFocus = useCallback(() => {
+    if (!isFocusing) return
+    resetPunishmentState()
+    setIsFocusing(false)
+    setPhoneDetected(false)
+  }, [isFocusing, resetPunishmentState])
+
+  const handleStartFocus = () => {
+    if (isFocusing) return
 
     const ACtx = window.AudioContext || window.webkitAudioContext
     if (ACtx) {
@@ -69,41 +110,18 @@ function App() {
     audio.preload = 'auto'
     gunshotAudioRef.current = audio
 
-    prevPhoneRef.current = false
-    executionPendingRef.current = false
-    punishmentDoneRef.current = false
-    disarmUntilPhoneClearRef.current = false
-    setIsShaking(false)
-    setIsMonitoring(true)
-  }
-
-  const clearPunishmentDelayTimer = () => {
-    if (punishmentDelayTimeoutRef.current) {
-      clearTimeout(punishmentDelayTimeoutRef.current)
-      punishmentDelayTimeoutRef.current = null
+    setViolationCount(0)
+    setLogs([])
+    if (focusMode === 'countdown') {
+      setCountdownRemaining(DEFAULT_COUNTDOWN_SEC)
+    } else {
+      setElapsedSeconds(0)
     }
-  }
-
-  const handleStopMonitoring = () => {
-    if (!isMonitoring) return
-    clearPunishmentDelayTimer()
-    executionPendingRef.current = false
-    punishmentDoneRef.current = false
-    disarmUntilPhoneClearRef.current = false
-    setIsShaking(false)
-    prevPhoneRef.current = false
-    setStatus('patrol')
-    const audio = gunshotAudioRef.current
-    if (audio) {
-      audio.pause()
-      audio.currentTime = 0
-    }
-    setIsMonitoring(false)
-    setPhoneDetected(false)
+    setIsFocusing(true)
   }
 
   useEffect(() => {
-    if (!isMonitoring) return
+    if (!isFocusing) return
 
     let cancelled = false
     const video = videoRef.current
@@ -158,32 +176,6 @@ function App() {
       }
     }
 
-    setupCamera()
-
-    return () => {
-      cancelled = true
-      if (rafRef.current) {
-        cancelAnimationFrame(rafRef.current)
-        rafRef.current = null
-      }
-      if (streamRef.current) {
-        streamRef.current.getTracks().forEach((track) => track.stop())
-        streamRef.current = null
-      }
-      if (video) video.srcObject = null
-      if (canvas) {
-        const ctx = canvas.getContext('2d')
-        if (ctx) ctx.clearRect(0, 0, canvas.width, canvas.height)
-      }
-      setCameraReady(false)
-      setPhoneDetected(false)
-      setCameraError('')
-    }
-  }, [isMonitoring])
-
-  useEffect(() => {
-    let cancelled = false
-
     const setupModel = async () => {
       try {
         await tf.ready()
@@ -200,21 +192,58 @@ function App() {
       }
     }
 
+    setupCamera()
     setupModel()
 
     return () => {
       cancelled = true
+      if (rafRef.current) {
+        cancelAnimationFrame(rafRef.current)
+        rafRef.current = null
+      }
+      if (streamRef.current) {
+        streamRef.current.getTracks().forEach((track) => track.stop())
+        streamRef.current = null
+      }
+      if (video) video.srcObject = null
+      if (canvas) {
+        const ctx = canvas.getContext('2d')
+        if (ctx) ctx.clearRect(0, 0, canvas.width, canvas.height)
+      }
       if (modelRef.current) {
         modelRef.current.dispose()
         modelRef.current = null
       }
+      setCameraReady(false)
       setModelReady(false)
+      setPhoneDetected(false)
+      setCameraError('')
       setModelError('')
     }
-  }, [])
+  }, [isFocusing])
 
   useEffect(() => {
-    if (!cameraReady || !modelReady) return
+    if (!isFocusing) return
+
+    const tick = window.setInterval(() => {
+      if (focusMode === 'countdown') {
+        setCountdownRemaining((prev) => {
+          if (prev <= 1) {
+            queueMicrotask(() => handleEndFocus())
+            return 0
+          }
+          return prev - 1
+        })
+      } else {
+        setElapsedSeconds((prev) => prev + 1)
+      }
+    }, 1000)
+
+    return () => clearInterval(tick)
+  }, [isFocusing, focusMode, handleEndFocus])
+
+  useEffect(() => {
+    if (!isFocusing || !cameraReady || !modelReady) return
 
     const detect = async () => {
       const videoEl = videoRef.current
@@ -274,18 +303,16 @@ function App() {
         rafRef.current = null
       }
     }
-  }, [cameraReady, modelReady])
+  }, [isFocusing, cameraReady, modelReady])
 
   useEffect(() => {
-    if (!isMonitoring || !cameraReady || !modelReady) {
+    if (!isFocusing || !cameraReady || !modelReady) {
       clearPunishmentDelayTimer()
       executionPendingRef.current = false
       punishmentDoneRef.current = false
       disarmUntilPhoneClearRef.current = false
       prevPhoneRef.current = false
-      queueMicrotask(() => {
-        setIsShaking(false)
-      })
+      queueMicrotask(() => setIsShaking(false))
       return
     }
 
@@ -296,15 +323,18 @@ function App() {
     const risingEdge = phoneDetected && !prevPhoneRef.current
     prevPhoneRef.current = phoneDetected
 
+    if (risingEdge) {
+      const entry = `${formatClockTime()} 拿起手机违规`
+      setLogs((prev) => [entry, ...prev].slice(0, 50))
+    }
+
     const canArm =
       risingEdge &&
       !executionPendingRef.current &&
       status === 'patrol' &&
       !disarmUntilPhoneClearRef.current
 
-    if (!canArm) {
-      return
-    }
+    if (!canArm) return
 
     executionPendingRef.current = true
     punishmentDoneRef.current = false
@@ -318,6 +348,7 @@ function App() {
       punishmentDoneRef.current = true
       disarmUntilPhoneClearRef.current = true
 
+      setViolationCount((c) => c + 1)
       setIsShaking(true)
       const audio = gunshotAudioRef.current
       if (audio) {
@@ -326,9 +357,16 @@ function App() {
         void audio.play().catch(() => {})
       }
     }, PUNISHMENT_DELAY_MS)
-  }, [phoneDetected, isMonitoring, cameraReady, modelReady, status])
+  }, [
+    phoneDetected,
+    isFocusing,
+    cameraReady,
+    modelReady,
+    status,
+    clearPunishmentDelayTimer,
+  ])
 
-  useEffect(() => () => clearPunishmentDelayTimer(), [])
+  useEffect(() => () => clearPunishmentDelayTimer(), [clearPunishmentDelayTimer])
 
   useEffect(() => {
     const v = officerBgVideoRef.current
@@ -350,9 +388,14 @@ function App() {
     punishmentDoneRef.current = false
   }
 
-  const showCornerMonitoring =
-    isMonitoring && cameraReady && modelReady && !phoneDetected && !cameraError && !modelError
-  const showPhoneBanner = phoneDetected && cameraReady && modelReady
+  const timerDisplay =
+    focusMode === 'countdown'
+      ? formatDuration(countdownRemaining)
+      : formatDuration(elapsedSeconds)
+
+  const aiActive = isFocusing && cameraReady && modelReady
+  const showCornerMonitoring = aiActive && !phoneDetected && !cameraError && !modelError
+  const showPhoneBanner = phoneDetected && aiActive
   const mainClassName = [
     'app',
     showPhoneBanner ? 'app--phone-alert' : '',
@@ -382,43 +425,108 @@ function App() {
           </div>
         )}
 
+        <aside className="cyber-dashboard" aria-label="专注统计仪表盘">
+          <div className="dashboard-header">
+            <span className="dashboard-badge">CYBER-PROCTOR</span>
+            <h2 className="dashboard-title">专注仪表盘</h2>
+          </div>
+
+          <div className="dashboard-timer-block">
+            <span className="dashboard-label">当前计时</span>
+            <div className="dashboard-timer">{timerDisplay}</div>
+            <span className="dashboard-mode-hint">
+              {focusMode === 'countdown' ? '倒计时专注 · 默认 25 分钟' : '正计时专注'}
+            </span>
+          </div>
+
+          <div className="dashboard-stats">
+            <div className="stat-card">
+              <span className="stat-label">违规次数</span>
+              <span className="stat-value stat-value--alert">{violationCount}</span>
+            </div>
+            <div className="stat-card">
+              <span className="stat-label">AI 检测</span>
+              <span className={`stat-value ${aiActive ? 'stat-value--ok' : ''}`}>
+                {aiActive ? '运行中' : '未启动'}
+              </span>
+            </div>
+          </div>
+
+          <div className="dashboard-logs">
+            <h3 className="logs-title">违规日志</h3>
+            <ul className="logs-list">
+              {logs.length === 0 ? (
+                <li className="logs-empty">暂无违规记录</li>
+              ) : (
+                logs.map((entry, index) => (
+                  <li key={`${entry}-${index}`} className="logs-item">
+                    {entry}
+                  </li>
+                ))
+              )}
+            </ul>
+          </div>
+        </aside>
+
         <header className="top-bar">
           <h1>Cyber-Proctor</h1>
-          <p>AI 监督学习演示版（手机检测）</p>
+          <p>AI 监督学习 · 专注模式</p>
+
+          <div className="focus-mode-row" role="group" aria-label="专注模式">
+            <label className={`mode-option${focusMode === 'countdown' ? ' mode-option--active' : ''}`}>
+              <input
+                type="radio"
+                name="focusMode"
+                value="countdown"
+                checked={focusMode === 'countdown'}
+                disabled={isFocusing}
+                onChange={() => setFocusMode('countdown')}
+              />
+              倒计时专注（25 分钟）
+            </label>
+            <label className={`mode-option${focusMode === 'stopwatch' ? ' mode-option--active' : ''}`}>
+              <input
+                type="radio"
+                name="focusMode"
+                value="stopwatch"
+                checked={focusMode === 'stopwatch'}
+                disabled={isFocusing}
+                onChange={() => setFocusMode('stopwatch')}
+              />
+              正计时专注
+            </label>
+          </div>
+
           <div className="start-row">
-            {!isMonitoring ? (
-              <button
-                type="button"
-                className="start-monitoring-btn"
-                onClick={handleStartMonitoring}
-              >
-                开始监控
+            {!isFocusing ? (
+              <button type="button" className="start-monitoring-btn" onClick={handleStartFocus}>
+                开始专注
               </button>
             ) : (
               <>
                 <button type="button" className="monitoring-active-btn" disabled>
-                  正在监控
+                  专注进行中
                 </button>
-                <button
-                  type="button"
-                  className="stop-monitoring-btn"
-                  onClick={handleStopMonitoring}
-                >
-                  停止监控
+                <button type="button" className="stop-monitoring-btn" onClick={handleEndFocus}>
+                  结束专注
                 </button>
               </>
             )}
-            {!isMonitoring && (
-              <span className="start-hint">请先点击「开始监控」授权摄像头；提示音仅在检测到手机时播放</span>
+            {!isFocusing && (
+              <span className="start-hint">
+                点击「开始专注」后才会启动摄像头与手机检测；倒计时归零将自动结束
+              </span>
             )}
           </div>
         </header>
 
         <section className="stage">
-          <div className="camera-panel">
-            <video ref={videoRef} autoPlay muted playsInline className="camera-feed" />
-            <canvas ref={canvasRef} className="overlay" />
-          </div>
+          {isFocusing && (
+            <div className="camera-panel">
+              <video ref={videoRef} autoPlay muted playsInline className="camera-feed" />
+              <canvas ref={canvasRef} className="overlay" />
+            </div>
+          )}
 
           <aside className="supervisor">
             <div className="avatar" aria-hidden="true">
@@ -427,20 +535,21 @@ function App() {
             <div>
               <h2>监督者</h2>
               <p>
-                {!isMonitoring
-                  ? '点击「开始监控」后才会开启摄像头。'
-                  : modelReady
-                    ? '模型已就绪，持续巡查中。'
-                    : '正在加载 AI 模型...'}
+                {!isFocusing
+                  ? '选择专注模式后点击「开始专注」。'
+                  : modelReady && cameraReady
+                    ? '模型与摄像头已就绪，持续巡查中。'
+                    : '正在加载 AI 模型与摄像头...'}
               </p>
-              {isMonitoring && !cameraReady && !cameraError && <p>正在请求摄像头...</p>}
+              {isFocusing && !cameraReady && !cameraError && <p>正在请求摄像头...</p>}
             </div>
           </aside>
         </section>
 
         <footer className="info">
-          <span>Camera: {!isMonitoring ? '未启动' : cameraReady ? 'Ready' : 'Loading'}</span>
-          <span>Model: {modelReady ? 'Ready' : 'Loading'}</span>
+          <span>专注: {isFocusing ? '进行中' : '未开始'}</span>
+          <span>Camera: {isFocusing ? (cameraReady ? 'Ready' : 'Loading') : '—'}</span>
+          <span>Model: {isFocusing ? (modelReady ? 'Ready' : 'Loading') : '—'}</span>
         </footer>
 
         {showCornerMonitoring && (
