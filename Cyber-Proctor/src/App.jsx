@@ -21,7 +21,7 @@ function isAbortLikeError(err) {
 }
 
 function formatClockTime(date = new Date()) {
-  return date.toLocaleTimeString('zh-CN', { hour12: false })
+  return date.toLocaleTimeString('en-US', { hour12: false })
 }
 
 function formatDuration(seconds) {
@@ -29,6 +29,12 @@ function formatDuration(seconds) {
   const m = Math.floor((seconds % 3600) / 60)
   const s = seconds % 60
   return [h, m, s].map((n) => String(n).padStart(2, '0')).join(':')
+}
+
+function getDefaultCameraPanelPos() {
+  if (typeof window === 'undefined') return { top: 78, left: 20 }
+  const width = Math.min(250, window.innerWidth - 40)
+  return { top: 78, left: window.innerWidth - width - 20 }
 }
 
 function App() {
@@ -47,8 +53,18 @@ function App() {
   const disarmUntilPhoneClearRef = useRef(false)
   const officerBgVideoRef = useRef(null)
   const punishmentDelayTimeoutRef = useRef(null)
+  const cameraPanelRef = useRef(null)
+  const panelDragRef = useRef({
+    active: false,
+    startX: 0,
+    startY: 0,
+    startLeft: 0,
+    startTop: 0,
+  })
 
   const [focusMode, setFocusMode] = useState('countdown')
+  const [cameraPanelPos, setCameraPanelPos] = useState(getDefaultCameraPanelPos)
+  const [isDraggingPanel, setIsDraggingPanel] = useState(false)
   const [isFocusing, setIsFocusing] = useState(false)
   const [countdownRemaining, setCountdownRemaining] = useState(DEFAULT_COUNTDOWN_SEC)
   const [elapsedSeconds, setElapsedSeconds] = useState(0)
@@ -62,6 +78,74 @@ function App() {
   const [phoneDetected, setPhoneDetected] = useState(false)
   const [cameraError, setCameraError] = useState('')
   const [modelError, setModelError] = useState('')
+  const [showEndSessionModal, setShowEndSessionModal] = useState(false)
+
+  const clampCameraPanelPos = useCallback((left, top) => {
+    const el = cameraPanelRef.current
+    const w = el?.offsetWidth ?? Math.min(250, window.innerWidth - 40)
+    const h = el?.offsetHeight ?? w * (9 / 16)
+    const maxLeft = Math.max(0, window.innerWidth - w)
+    const maxTop = Math.max(0, window.innerHeight - h)
+    return {
+      left: Math.min(Math.max(0, left), maxLeft),
+      top: Math.min(Math.max(0, top), maxTop),
+    }
+  }, [])
+
+  const handleCameraPanelDragStart = (e) => {
+    if (e.button !== 0) return
+    e.preventDefault()
+    panelDragRef.current = {
+      active: true,
+      startX: e.clientX,
+      startY: e.clientY,
+      startLeft: cameraPanelPos.left,
+      startTop: cameraPanelPos.top,
+    }
+    setIsDraggingPanel(true)
+  }
+
+  useEffect(() => {
+    const onMove = (e) => {
+      if (!panelDragRef.current.active) return
+      const dx = e.clientX - panelDragRef.current.startX
+      const dy = e.clientY - panelDragRef.current.startY
+      setCameraPanelPos(
+        clampCameraPanelPos(
+          panelDragRef.current.startLeft + dx,
+          panelDragRef.current.startTop + dy,
+        ),
+      )
+    }
+    const onUp = () => {
+      if (!panelDragRef.current.active) return
+      panelDragRef.current.active = false
+      setIsDraggingPanel(false)
+      setCameraPanelPos((pos) => clampCameraPanelPos(pos.left, pos.top))
+    }
+    window.addEventListener('mousemove', onMove)
+    window.addEventListener('mouseup', onUp)
+    return () => {
+      window.removeEventListener('mousemove', onMove)
+      window.removeEventListener('mouseup', onUp)
+    }
+  }, [clampCameraPanelPos])
+
+  useEffect(() => {
+    const onResize = () => {
+      setCameraPanelPos((pos) => clampCameraPanelPos(pos.left, pos.top))
+    }
+    window.addEventListener('resize', onResize)
+    return () => window.removeEventListener('resize', onResize)
+  }, [clampCameraPanelPos])
+
+  useEffect(() => {
+    if (!isFocusing) return
+    const id = requestAnimationFrame(() => {
+      setCameraPanelPos((pos) => clampCameraPanelPos(pos.left, pos.top))
+    })
+    return () => cancelAnimationFrame(id)
+  }, [isFocusing, cameraReady, modelReady, clampCameraPanelPos])
 
   const clearPunishmentDelayTimer = useCallback(() => {
     if (punishmentDelayTimeoutRef.current) {
@@ -85,12 +169,39 @@ function App() {
     }
   }, [clearPunishmentDelayTimer])
 
-  const handleEndFocus = useCallback(() => {
-    if (!isFocusing) return
+  const stopFocusSession = useCallback(() => {
     resetPunishmentState()
     setIsFocusing(false)
     setPhoneDetected(false)
-  }, [isFocusing, resetPunishmentState])
+  }, [resetPunishmentState])
+
+  const resetTimersAfterSession = useCallback(() => {
+    if (focusMode === 'countdown') {
+      setCountdownRemaining(DEFAULT_COUNTDOWN_SEC)
+    } else {
+      setElapsedSeconds(0)
+    }
+  }, [focusMode])
+
+  const finalizeEndFocus = useCallback(() => {
+    if (!isFocusing) return
+    stopFocusSession()
+    resetTimersAfterSession()
+  }, [isFocusing, stopFocusSession, resetTimersAfterSession])
+
+  const handleRequestEndFocus = () => {
+    if (!isFocusing) return
+    setShowEndSessionModal(true)
+  }
+
+  const handleCancelEndFocus = () => {
+    setShowEndSessionModal(false)
+  }
+
+  const handleConfirmEndFocus = () => {
+    setShowEndSessionModal(false)
+    finalizeEndFocus()
+  }
 
   const handleStartFocus = () => {
     if (isFocusing) return
@@ -155,7 +266,7 @@ function App() {
               streamRef.current = null
               return
             }
-            setCameraError(`无法播放摄像头画面：${playErr.message}`)
+            setCameraError(`Unable to play camera feed: ${playErr.message}`)
             stream.getTracks().forEach((track) => track.stop())
             streamRef.current = null
             return
@@ -172,7 +283,7 @@ function App() {
         setCameraReady(true)
       } catch (cameraErr) {
         if (cancelled || isAbortLikeError(cameraErr)) return
-        setCameraError(`无法访问摄像头：${cameraErr.message}`)
+        setCameraError(`Unable to access camera: ${cameraErr.message}`)
       }
     }
 
@@ -188,7 +299,7 @@ function App() {
         setModelError('')
         setModelReady(true)
       } catch (modelErr) {
-        if (!cancelled) setModelError(`模型加载失败：${modelErr.message}`)
+        if (!cancelled) setModelError(`Failed to load model: ${modelErr.message}`)
       }
     }
 
@@ -229,7 +340,7 @@ function App() {
       if (focusMode === 'countdown') {
         setCountdownRemaining((prev) => {
           if (prev <= 1) {
-            queueMicrotask(() => handleEndFocus())
+            queueMicrotask(() => finalizeEndFocus())
             return 0
           }
           return prev - 1
@@ -240,7 +351,7 @@ function App() {
     }, 1000)
 
     return () => clearInterval(tick)
-  }, [isFocusing, focusMode, handleEndFocus])
+  }, [isFocusing, focusMode, finalizeEndFocus])
 
   useEffect(() => {
     if (!isFocusing || !cameraReady || !modelReady) return
@@ -286,10 +397,10 @@ function App() {
           ctx.strokeRect(x, y, width, height)
           ctx.fillRect(x, y - 24, 80, 24)
           ctx.fillStyle = '#fff'
-          ctx.fillText('手机', x + 18, y - 7)
+          ctx.fillText('Phone', x + 18, y - 7)
         })
       } catch (detectError) {
-        setModelError(`检测中断：${detectError.message}`)
+        setModelError(`Detection interrupted: ${detectError.message}`)
       } finally {
         predictingRef.current = false
         rafRef.current = requestAnimationFrame(detect)
@@ -324,7 +435,7 @@ function App() {
     prevPhoneRef.current = phoneDetected
 
     if (risingEdge) {
-      const entry = `${formatClockTime()} 拿起手机违规`
+      const entry = `${formatClockTime()} — Phone usage detected`
       setLogs((prev) => [entry, ...prev].slice(0, 50))
     }
 
@@ -425,38 +536,40 @@ function App() {
           </div>
         )}
 
-        <aside className="cyber-dashboard" aria-label="专注统计仪表盘">
+        <aside className="cyber-dashboard" aria-label="Focus statistics dashboard">
           <div className="dashboard-header">
             <span className="dashboard-badge">CYBER-PROCTOR</span>
-            <h2 className="dashboard-title">专注仪表盘</h2>
+            <h2 className="dashboard-title">Focus Dashboard</h2>
           </div>
 
           <div className="dashboard-timer-block">
-            <span className="dashboard-label">当前计时</span>
+            <span className="dashboard-label">Current Timer</span>
             <div className="dashboard-timer">{timerDisplay}</div>
             <span className="dashboard-mode-hint">
-              {focusMode === 'countdown' ? '倒计时专注 · 默认 25 分钟' : '正计时专注'}
+              {focusMode === 'countdown'
+                ? 'Pomodoro Mode · 25 min default'
+                : 'Stopwatch Mode · Count Up'}
             </span>
           </div>
 
           <div className="dashboard-stats">
             <div className="stat-card">
-              <span className="stat-label">违规次数</span>
+              <span className="stat-label">Total Violations</span>
               <span className="stat-value stat-value--alert">{violationCount}</span>
             </div>
             <div className="stat-card">
-              <span className="stat-label">AI 检测</span>
+              <span className="stat-label">AI Detection</span>
               <span className={`stat-value ${aiActive ? 'stat-value--ok' : ''}`}>
-                {aiActive ? '运行中' : '未启动'}
+                {aiActive ? 'Active' : 'Inactive'}
               </span>
             </div>
           </div>
 
           <div className="dashboard-logs">
-            <h3 className="logs-title">违规日志</h3>
+            <h3 className="logs-title">Violation Logs</h3>
             <ul className="logs-list">
               {logs.length === 0 ? (
-                <li className="logs-empty">暂无违规记录</li>
+                <li className="logs-empty">No violations recorded</li>
               ) : (
                 logs.map((entry, index) => (
                   <li key={`${entry}-${index}`} className="logs-item">
@@ -470,9 +583,9 @@ function App() {
 
         <header className="top-bar">
           <h1>Cyber-Proctor</h1>
-          <p>AI 监督学习 · 专注模式</p>
+          <p>AI-Proctored Focus Sessions</p>
 
-          <div className="focus-mode-row" role="group" aria-label="专注模式">
+          <div className="focus-mode-row" role="group" aria-label="Focus mode">
             <label className={`mode-option${focusMode === 'countdown' ? ' mode-option--active' : ''}`}>
               <input
                 type="radio"
@@ -482,7 +595,7 @@ function App() {
                 disabled={isFocusing}
                 onChange={() => setFocusMode('countdown')}
               />
-              倒计时专注（25 分钟）
+              Pomodoro Mode (25 Min)
             </label>
             <label className={`mode-option${focusMode === 'stopwatch' ? ' mode-option--active' : ''}`}>
               <input
@@ -493,28 +606,33 @@ function App() {
                 disabled={isFocusing}
                 onChange={() => setFocusMode('stopwatch')}
               />
-              正计时专注
+              Stopwatch Mode
             </label>
           </div>
 
           <div className="start-row">
             {!isFocusing ? (
               <button type="button" className="start-monitoring-btn" onClick={handleStartFocus}>
-                开始专注
+                Start Focus
               </button>
             ) : (
               <>
                 <button type="button" className="monitoring-active-btn" disabled>
-                  专注进行中
+                  Focus In Progress
                 </button>
-                <button type="button" className="stop-monitoring-btn" onClick={handleEndFocus}>
-                  结束专注
+                <button
+                  type="button"
+                  className="stop-monitoring-btn"
+                  onClick={handleRequestEndFocus}
+                >
+                  End Focus
                 </button>
               </>
             )}
             {!isFocusing && (
               <span className="start-hint">
-                点击「开始专注」后才会启动摄像头与手机检测；倒计时归零将自动结束
+                Camera and phone detection start after you click Start Focus. Pomodoro sessions
+                end automatically when the timer reaches zero.
               </span>
             )}
           </div>
@@ -522,39 +640,78 @@ function App() {
 
         <section className="stage">
           {isFocusing && (
-            <div className="camera-panel">
-              <video ref={videoRef} autoPlay muted playsInline className="camera-feed" />
-              <canvas ref={canvasRef} className="overlay" />
+            <div
+              ref={cameraPanelRef}
+              className={`camera-panel${isDraggingPanel ? ' camera-panel--dragging' : ''}`}
+              style={{
+                left: cameraPanelPos.left,
+                top: cameraPanelPos.top,
+              }}
+            >
+              <div
+                className="camera-panel-drag-handle"
+                onMouseDown={handleCameraPanelDragStart}
+                role="presentation"
+                title="Drag to move monitor window"
+              >
+                <span className="camera-panel-drag-title">LIVE MONITOR</span>
+                <span className="camera-panel-drag-hint">
+                  Camera: {cameraReady ? 'Ready' : 'Loading'} · Model:{' '}
+                  {modelReady ? 'Ready' : 'Loading'}
+                </span>
+              </div>
+              <div className="camera-panel-body">
+                <video ref={videoRef} autoPlay muted playsInline className="camera-feed" />
+                <canvas ref={canvasRef} className="overlay" />
+              </div>
             </div>
           )}
-
-          <aside className="supervisor">
-            <div className="avatar" aria-hidden="true">
-              🕵️
-            </div>
-            <div>
-              <h2>监督者</h2>
-              <p>
-                {!isFocusing
-                  ? '选择专注模式后点击「开始专注」。'
-                  : modelReady && cameraReady
-                    ? '模型与摄像头已就绪，持续巡查中。'
-                    : '正在加载 AI 模型与摄像头...'}
-              </p>
-              {isFocusing && !cameraReady && !cameraError && <p>正在请求摄像头...</p>}
-            </div>
-          </aside>
         </section>
 
         <footer className="info">
-          <span>专注: {isFocusing ? '进行中' : '未开始'}</span>
+          <span>Focus: {isFocusing ? 'Active' : 'Not started'}</span>
           <span>Camera: {isFocusing ? (cameraReady ? 'Ready' : 'Loading') : '—'}</span>
           <span>Model: {isFocusing ? (modelReady ? 'Ready' : 'Loading') : '—'}</span>
         </footer>
 
         {showCornerMonitoring && (
           <div className="corner-monitor-msg" role="status" aria-live="polite">
-            <p className="monitoring-hint">正在监控中...</p>
+            <p className="monitoring-hint">Monitoring in progress…</p>
+          </div>
+        )}
+
+        {showEndSessionModal && (
+          <div
+            className="modal-overlay"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="end-session-title"
+            onClick={handleCancelEndFocus}
+          >
+            <div className="modal-card" onClick={(e) => e.stopPropagation()}>
+              <h2 id="end-session-title" className="modal-title">
+                End Focus Session
+              </h2>
+              <p className="modal-message">
+                Are you sure you want to end the current session?
+              </p>
+              <div className="modal-actions">
+                <button
+                  type="button"
+                  className="modal-btn modal-btn--cancel"
+                  onClick={handleCancelEndFocus}
+                >
+                  Cancel
+                </button>
+                <button
+                  type="button"
+                  className="modal-btn modal-btn--confirm"
+                  onClick={handleConfirmEndFocus}
+                >
+                  End Session
+                </button>
+              </div>
+            </div>
           </div>
         )}
 
