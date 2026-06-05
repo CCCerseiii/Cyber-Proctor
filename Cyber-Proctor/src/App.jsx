@@ -7,12 +7,60 @@ const PHONE_CLASS = 'cell phone'
 const DETECT_MAX_BOXES = 40
 const DETECT_MIN_SCORE = 0.22
 const GUNSHOT_SRC = `${import.meta.env.BASE_URL}gunshot.mp3`
-const OFFICER_PATROL_SRC = `${import.meta.env.BASE_URL}officer_patrol.mp4`
-const OFFICER_SHOOT_SRC = `${import.meta.env.BASE_URL}officer_shoot.mp4`
+
+function assetUrl(path) {
+  const normalized = path.startsWith('/') ? path.slice(1) : path
+  return `${import.meta.env.BASE_URL}${normalized}`
+}
 const SILENT_WAV =
   'data:audio/wav;base64,UklGRigAAABXQVZFZm10IBIAAAABAAEARKwAAIhYAQACABAAAABkYXRhAgAAAAEA'
 const PUNISHMENT_DELAY_MS = 1800
 const DEFAULT_COUNTDOWN_SEC = 25 * 60
+
+const VISUAL_SCENES = {
+  supervisor: {
+    name: 'Cyber Supervisor (Default)',
+    patrolVideoSrc: 'officer_patrol.mp4',
+    punishmentVideoSrc: 'officer_shoot.mp4',
+  },
+  fireplace: {
+    name: 'Cozy Fireplace',
+    videoSrc: 'fireplace.mp4',
+  },
+  rain: {
+    name: 'Window Rain',
+    videoSrc: 'rain.mp4',
+  },
+  rainforest: {
+    name: 'Cyber Rainforest',
+    videoSrc: 'rainforest.mp4',
+  },
+  classroom: {
+    name: 'Study Classroom',
+    videoSrc: 'classroom.mp4',
+  },
+  library: {
+    name: 'Quiet Library',
+    videoSrc: 'library.mp4',
+  },
+}
+
+const SUPERVISOR_PATROL_VIDEO_SRC = assetUrl(
+  VISUAL_SCENES.supervisor.patrolVideoSrc,
+)
+const SUPERVISOR_SHOOT_VIDEO_SRC = assetUrl(
+  VISUAL_SCENES.supervisor.punishmentVideoSrc,
+)
+
+const AMBIENT_SOUNDS = {
+  none: { name: 'None', audioSrc: null },
+  white: { name: 'Pure White Noise', audioSrc: 'white-noise.mp3' },
+  fireplace: {
+    name: 'Fireplace Crackling',
+    audioSrc: 'fireplace-noise.mp3',
+  },
+  rain: { name: 'Deep Rain Comfort', audioSrc: 'rain-noise.mp3' },
+}
 
 function isAbortLikeError(err) {
   if (!err) return false
@@ -29,6 +77,40 @@ function formatDuration(seconds) {
   const m = Math.floor((seconds % 3600) / 60)
   const s = seconds % 60
   return [h, m, s].map((n) => String(n).padStart(2, '0')).join(':')
+}
+
+const CUSTOM_DURATION_FALLBACK_MIN = 1
+
+function getCustomPreviewSeconds(minutes) {
+  if (minutes === '' || minutes === null || minutes === undefined) return 0
+  const n = parseInt(String(minutes), 10)
+  if (Number.isNaN(n) || n <= 0) return 0
+  return Math.min(999, n) * 60
+}
+
+function resolveCustomDurationMinutes(
+  minutes,
+  fallbackMinutes = CUSTOM_DURATION_FALLBACK_MIN,
+) {
+  if (minutes === '' || minutes === null || minutes === undefined) {
+    return fallbackMinutes
+  }
+  const n = parseInt(String(minutes), 10)
+  if (Number.isNaN(n) || n < 1) return fallbackMinutes
+  return Math.min(999, n)
+}
+
+function resolveCustomDurationSeconds(
+  minutes,
+  fallbackMinutes = CUSTOM_DURATION_FALLBACK_MIN,
+) {
+  return resolveCustomDurationMinutes(minutes, fallbackMinutes) * 60
+}
+
+function isCustomMinutesInvalidForStart(minutes) {
+  if (minutes === '' || minutes === null || minutes === undefined) return true
+  const n = parseInt(String(minutes), 10)
+  return Number.isNaN(n) || n < 1
 }
 
 function getDefaultCameraPanelPos() {
@@ -51,7 +133,12 @@ function App() {
   const executionPendingRef = useRef(false)
   const punishmentDoneRef = useRef(false)
   const disarmUntilPhoneClearRef = useRef(false)
-  const officerBgVideoRef = useRef(null)
+  const sceneVideoRef = useRef(null)
+  const patrolVideoRef = useRef(null)
+  const punishmentVideoRef = useRef(null)
+  const patrolAutoplayMutedForAutoplayRef = useRef(false)
+  const supervisorPatrolAudioUnlockedRef = useRef(false)
+  const ambientAudioRef = useRef(null)
   const punishmentDelayTimeoutRef = useRef(null)
   const cameraPanelRef = useRef(null)
   const panelDragRef = useRef({
@@ -62,14 +149,18 @@ function App() {
     startTop: 0,
   })
 
-  const [focusMode, setFocusMode] = useState('countdown')
+  const [focusMode, setFocusMode] = useState('pomodoro')
+  const [customMinutes, setCustomMinutes] = useState('25')
   const [cameraPanelPos, setCameraPanelPos] = useState(getDefaultCameraPanelPos)
   const [isDraggingPanel, setIsDraggingPanel] = useState(false)
   const [isFocusing, setIsFocusing] = useState(false)
   const [countdownRemaining, setCountdownRemaining] = useState(DEFAULT_COUNTDOWN_SEC)
   const [elapsedSeconds, setElapsedSeconds] = useState(0)
-  const [violationCount, setViolationCount] = useState(0)
+  const [totalViolations, setTotalViolations] = useState(0)
   const [logs, setLogs] = useState([])
+  const [visualScene, setVisualScene] = useState('supervisor')
+  const [ambientSound, setAmbientSound] = useState('none')
+  const [supervisorPatrolMuted, setSupervisorPatrolMuted] = useState(true)
 
   const [isShaking, setIsShaking] = useState(false)
   const [status, setStatus] = useState('patrol')
@@ -79,6 +170,7 @@ function App() {
   const [cameraError, setCameraError] = useState('')
   const [modelError, setModelError] = useState('')
   const [showEndSessionModal, setShowEndSessionModal] = useState(false)
+  const [showCompletionModal, setShowCompletionModal] = useState(false)
 
   const clampCameraPanelPos = useCallback((left, top) => {
     const el = cameraPanelRef.current
@@ -154,6 +246,51 @@ function App() {
     }
   }, [])
 
+  const playSupervisorPatrol = useCallback(async () => {
+    const v = patrolVideoRef.current
+    if (!v) return
+
+    const playMuted = async () => {
+      patrolAutoplayMutedForAutoplayRef.current = true
+      setSupervisorPatrolMuted(true)
+      v.muted = true
+      try {
+        await v.play()
+      } catch {
+        // Browser may still block playback until user gesture.
+      }
+    }
+
+    if (supervisorPatrolAudioUnlockedRef.current) {
+      patrolAutoplayMutedForAutoplayRef.current = false
+      setSupervisorPatrolMuted(false)
+      v.muted = false
+      try {
+        await v.play()
+      } catch {
+        await playMuted()
+      }
+      return
+    }
+
+    v.muted = true
+    setSupervisorPatrolMuted(true)
+    try {
+      await v.play()
+    } catch {
+      // Retry once after a frame (some browsers need muted attribute flushed).
+      requestAnimationFrame(() => void playMuted())
+    }
+  }, [])
+
+  const patrolVideoCallbackRef = useCallback(
+    (node) => {
+      patrolVideoRef.current = node
+      if (node) void playSupervisorPatrol()
+    },
+    [playSupervisorPatrol],
+  )
+
   const resetPunishmentState = useCallback(() => {
     clearPunishmentDelayTimer()
     executionPendingRef.current = false
@@ -169,6 +306,13 @@ function App() {
     }
   }, [clearPunishmentDelayTimer])
 
+  const pauseAmbientAudio = useCallback(() => {
+    if (ambientAudioRef.current) {
+      ambientAudioRef.current.pause()
+      ambientAudioRef.current.currentTime = 0
+    }
+  }, [])
+
   const stopFocusSession = useCallback(() => {
     resetPunishmentState()
     setIsFocusing(false)
@@ -176,18 +320,37 @@ function App() {
   }, [resetPunishmentState])
 
   const resetTimersAfterSession = useCallback(() => {
-    if (focusMode === 'countdown') {
+    if (focusMode === 'pomodoro') {
       setCountdownRemaining(DEFAULT_COUNTDOWN_SEC)
+    } else if (focusMode === 'custom') {
+      setCountdownRemaining(getCustomPreviewSeconds(customMinutes))
     } else {
       setElapsedSeconds(0)
     }
-  }, [focusMode])
+  }, [focusMode, customMinutes])
 
   const finalizeEndFocus = useCallback(() => {
     if (!isFocusing) return
+    pauseAmbientAudio()
     stopFocusSession()
     resetTimersAfterSession()
-  }, [isFocusing, stopFocusSession, resetTimersAfterSession])
+  }, [isFocusing, pauseAmbientAudio, stopFocusSession, resetTimersAfterSession])
+
+  const handleCountdownComplete = useCallback(() => {
+    if (!isFocusing) return
+    if (rafRef.current) {
+      cancelAnimationFrame(rafRef.current)
+      rafRef.current = null
+    }
+    pauseAmbientAudio()
+    stopFocusSession()
+    resetTimersAfterSession()
+    setShowCompletionModal(true)
+  }, [isFocusing, pauseAmbientAudio, stopFocusSession, resetTimersAfterSession])
+
+  const handleDismissCompletionModal = () => {
+    setShowCompletionModal(false)
+  }
 
   const handleRequestEndFocus = () => {
     if (!isFocusing) return
@@ -201,6 +364,28 @@ function App() {
   const handleConfirmEndFocus = () => {
     setShowEndSessionModal(false)
     finalizeEndFocus()
+  }
+
+  const handleFocusModeChange = (mode) => {
+    setFocusMode(mode)
+    if (isFocusing) return
+    if (mode === 'pomodoro') {
+      setCountdownRemaining(DEFAULT_COUNTDOWN_SEC)
+    } else if (mode === 'custom') {
+      setCountdownRemaining(getCustomPreviewSeconds(customMinutes))
+    }
+  }
+
+  const handleCustomMinutesChange = (e) => {
+    const raw = e.target.value
+    if (raw === '') {
+      setCustomMinutes('')
+      return
+    }
+    if (!/^\d+$/.test(raw)) return
+    const n = parseInt(raw, 10)
+    if (n > 999) return
+    setCustomMinutes(raw)
   }
 
   const handleStartFocus = () => {
@@ -221,13 +406,30 @@ function App() {
     audio.preload = 'auto'
     gunshotAudioRef.current = audio
 
-    setViolationCount(0)
+    setTotalViolations(0)
     setLogs([])
-    if (focusMode === 'countdown') {
+    setShowCompletionModal(false)
+    if (focusMode === 'pomodoro') {
       setCountdownRemaining(DEFAULT_COUNTDOWN_SEC)
+    } else if (focusMode === 'custom') {
+      const resolvedMinutes = resolveCustomDurationMinutes(customMinutes)
+      if (isCustomMinutesInvalidForStart(customMinutes)) {
+        setCustomMinutes(String(resolvedMinutes))
+      }
+      setCountdownRemaining(resolveCustomDurationSeconds(customMinutes))
     } else {
       setElapsedSeconds(0)
     }
+
+    supervisorPatrolAudioUnlockedRef.current = true
+    patrolAutoplayMutedForAutoplayRef.current = false
+    setSupervisorPatrolMuted(false)
+    const patrol = patrolVideoRef.current
+    if (patrol) {
+      patrol.muted = false
+      void patrol.play().catch(() => {})
+    }
+
     setIsFocusing(true)
   }
 
@@ -337,10 +539,10 @@ function App() {
     if (!isFocusing) return
 
     const tick = window.setInterval(() => {
-      if (focusMode === 'countdown') {
+      if (focusMode === 'pomodoro' || focusMode === 'custom') {
         setCountdownRemaining((prev) => {
           if (prev <= 1) {
-            queueMicrotask(() => finalizeEndFocus())
+            queueMicrotask(() => handleCountdownComplete())
             return 0
           }
           return prev - 1
@@ -351,10 +553,10 @@ function App() {
     }, 1000)
 
     return () => clearInterval(tick)
-  }, [isFocusing, focusMode, finalizeEndFocus])
+  }, [isFocusing, focusMode, handleCountdownComplete])
 
   useEffect(() => {
-    if (!isFocusing || !cameraReady || !modelReady) return
+    if (!isFocusing || !cameraReady || !modelReady || showCompletionModal) return
 
     const detect = async () => {
       const videoEl = videoRef.current
@@ -414,10 +616,10 @@ function App() {
         rafRef.current = null
       }
     }
-  }, [isFocusing, cameraReady, modelReady])
+  }, [isFocusing, cameraReady, modelReady, showCompletionModal])
 
   useEffect(() => {
-    if (!isFocusing || !cameraReady || !modelReady) {
+    if (!isFocusing || !cameraReady || !modelReady || showCompletionModal) {
       clearPunishmentDelayTimer()
       executionPendingRef.current = false
       punishmentDoneRef.current = false
@@ -437,15 +639,18 @@ function App() {
     if (risingEdge) {
       const entry = `${formatClockTime()} — Phone usage detected`
       setLogs((prev) => [entry, ...prev].slice(0, 50))
+      setTotalViolations((c) => c + 1)
     }
 
-    const canArm =
+    const isSupervisorScene = visualScene === 'supervisor'
+    const canArmSupervisorPunishment =
       risingEdge &&
+      isSupervisorScene &&
       !executionPendingRef.current &&
       status === 'patrol' &&
       !disarmUntilPhoneClearRef.current
 
-    if (!canArm) return
+    if (!canArmSupervisorPunishment) return
 
     executionPendingRef.current = true
     punishmentDoneRef.current = false
@@ -459,7 +664,6 @@ function App() {
       punishmentDoneRef.current = true
       disarmUntilPhoneClearRef.current = true
 
-      setViolationCount((c) => c + 1)
       setIsShaking(true)
       const audio = gunshotAudioRef.current
       if (audio) {
@@ -474,20 +678,88 @@ function App() {
     cameraReady,
     modelReady,
     status,
+    visualScene,
+    showCompletionModal,
     clearPunishmentDelayTimer,
   ])
 
   useEffect(() => () => clearPunishmentDelayTimer(), [clearPunishmentDelayTimer])
 
-  useEffect(() => {
-    const v = officerBgVideoRef.current
-    if (!v) return
-    void v.play().catch(() => {})
-  }, [status])
+  const handleVisualSceneChange = (nextScene) => {
+    if (nextScene !== 'supervisor' && status === 'shoot') {
+      resetPunishmentState()
+    }
+    setVisualScene(nextScene)
+  }
 
-  const handleOfficerShootEnded = () => {
+  useEffect(() => {
+    const sound = AMBIENT_SOUNDS[ambientSound]
+    if (!sound?.audioSrc || !isFocusing || showCompletionModal) {
+      if (ambientAudioRef.current) {
+        ambientAudioRef.current.pause()
+        ambientAudioRef.current = null
+      }
+      return
+    }
+
+    const audio = new Audio(assetUrl(sound.audioSrc))
+    audio.loop = true
+    audio.volume = 0.55
+    ambientAudioRef.current = audio
+    void audio.play().catch(() => {})
+
+    return () => {
+      audio.pause()
+      ambientAudioRef.current = null
+    }
+  }, [ambientSound, isFocusing, showCompletionModal])
+
+  const isSupervisorScene = visualScene === 'supervisor'
+  const showSupervisorPunishment =
+    isSupervisorScene && status === 'shoot' && isFocusing
+
+  useEffect(() => {
+    if (visualScene !== 'supervisor') {
+      patrolAutoplayMutedForAutoplayRef.current = false
+      if (!supervisorPatrolAudioUnlockedRef.current) {
+        setSupervisorPatrolMuted(true)
+      }
+      return
+    }
+
+    void playSupervisorPatrol()
+
+    const v = patrolVideoRef.current
+    if (!v) return
+
+    const retry = () => void playSupervisorPatrol()
+    v.addEventListener('loadeddata', retry)
+    v.addEventListener('canplay', retry)
+    return () => {
+      v.removeEventListener('loadeddata', retry)
+      v.removeEventListener('canplay', retry)
+    }
+  }, [visualScene, playSupervisorPatrol])
+
+  useEffect(() => {
+    if (visualScene === 'supervisor') return
+    const v = sceneVideoRef.current
+    if (!v) return
+    void v.load()
+    void v.play().catch(() => {})
+  }, [visualScene])
+
+  useEffect(() => {
+    if (!showSupervisorPunishment) return
+    const v = punishmentVideoRef.current
+    if (!v) return
+    v.currentTime = 0
+    void v.play().catch(() => {})
+  }, [showSupervisorPunishment])
+
+  const handleSupervisorShootEnded = () => {
     if (!punishmentDoneRef.current) {
-      const v = officerBgVideoRef.current
+      const v = punishmentVideoRef.current
       if (v) {
         v.currentTime = 0
         void v.play().catch(() => {})
@@ -499,14 +771,28 @@ function App() {
     punishmentDoneRef.current = false
   }
 
-  const timerDisplay =
-    focusMode === 'countdown'
-      ? formatDuration(countdownRemaining)
-      : formatDuration(elapsedSeconds)
+  const isCountdownMode = focusMode === 'pomodoro' || focusMode === 'custom'
+  const timerDisplay = isCountdownMode
+    ? formatDuration(
+        !isFocusing && focusMode === 'custom'
+          ? getCustomPreviewSeconds(customMinutes)
+          : countdownRemaining,
+      )
+    : formatDuration(elapsedSeconds)
+
+  const timerModeHint =
+    focusMode === 'pomodoro'
+      ? 'Pomodoro Mode · 25 min default'
+      : focusMode === 'custom'
+        ? customMinutes === ''
+          ? 'Custom Mode · Set minutes'
+          : `Custom Mode · ${customMinutes} min`
+        : 'Stopwatch Mode · Count Up'
 
   const aiActive = isFocusing && cameraReady && modelReady
+
   const showCornerMonitoring = aiActive && !phoneDetected && !cameraError && !modelError
-  const showPhoneBanner = phoneDetected && aiActive
+  const showPhoneBanner = phoneDetected && aiActive && isSupervisorScene
   const mainClassName = [
     'app',
     showPhoneBanner ? 'app--phone-alert' : '',
@@ -517,17 +803,55 @@ function App() {
 
   return (
     <main className={mainClassName}>
-      <video
-        ref={officerBgVideoRef}
-        className="officer-bg-video"
-        src={status === 'patrol' ? OFFICER_PATROL_SRC : OFFICER_SHOOT_SRC}
-        loop={status === 'patrol'}
-        muted
-        playsInline
-        preload="auto"
+      <div
+        className={[
+          'scene-bg-video',
+          showSupervisorPunishment ? 'scene-bg-video--punishment' : '',
+        ]
+          .filter(Boolean)
+          .join(' ')}
         aria-hidden={true}
-        onEnded={status === 'shoot' ? handleOfficerShootEnded : undefined}
-      />
+      >
+        {isSupervisorScene ? (
+          <>
+            <video
+              ref={patrolVideoCallbackRef}
+              className="officer-bg-video officer-bg-video--patrol"
+              src={SUPERVISOR_PATROL_VIDEO_SRC}
+              loop
+              autoPlay
+              playsInline
+              preload="auto"
+              muted={supervisorPatrolMuted}
+              onLoadedData={() => void playSupervisorPatrol()}
+              onCanPlay={() => void playSupervisorPatrol()}
+            />
+            {showSupervisorPunishment && (
+              <video
+                ref={punishmentVideoRef}
+                className="officer-bg-video officer-bg-video--punishment"
+                src={SUPERVISOR_SHOOT_VIDEO_SRC}
+                autoPlay
+                playsInline
+                preload="auto"
+                muted={false}
+                onEnded={handleSupervisorShootEnded}
+              />
+            )}
+          </>
+        ) : (
+          <video
+            ref={sceneVideoRef}
+            className="officer-bg-video"
+            src={assetUrl(VISUAL_SCENES[visualScene].videoSrc)}
+            loop
+            autoPlay
+            playsInline
+            preload="auto"
+            muted
+          />
+        )}
+      </div>
 
       <div className="app-content">
         {showPhoneBanner && (
@@ -545,17 +869,13 @@ function App() {
           <div className="dashboard-timer-block">
             <span className="dashboard-label">Current Timer</span>
             <div className="dashboard-timer">{timerDisplay}</div>
-            <span className="dashboard-mode-hint">
-              {focusMode === 'countdown'
-                ? 'Pomodoro Mode · 25 min default'
-                : 'Stopwatch Mode · Count Up'}
-            </span>
+            <span className="dashboard-mode-hint">{timerModeHint}</span>
           </div>
 
           <div className="dashboard-stats">
             <div className="stat-card">
               <span className="stat-label">Total Violations</span>
-              <span className="stat-value stat-value--alert">{violationCount}</span>
+              <span className="stat-value stat-value--alert">{totalViolations}</span>
             </div>
             <div className="stat-card">
               <span className="stat-label">AI Detection</span>
@@ -563,6 +883,49 @@ function App() {
                 {aiActive ? 'Active' : 'Inactive'}
               </span>
             </div>
+          </div>
+
+          <div className="dashboard-env">
+            <h3 className="env-title">Environment</h3>
+            <label className="env-field">
+              <span className="env-label">Visual Scene</span>
+              <div className="env-select-wrap">
+                <select
+                  className="env-select"
+                  value={visualScene}
+                  disabled={isFocusing}
+                  onChange={(e) => handleVisualSceneChange(e.target.value)}
+                >
+                  {Object.entries(VISUAL_SCENES).map(([key, scene]) => (
+                    <option key={key} value={key}>
+                      {scene.name}
+                    </option>
+                  ))}
+                </select>
+              </div>
+            </label>
+            <label className="env-field">
+              <span className="env-label">Ambient Sound</span>
+              <div className="env-select-wrap">
+                <select
+                  className="env-select"
+                  value={ambientSound}
+                  disabled={isFocusing}
+                  onChange={(e) => setAmbientSound(e.target.value)}
+                >
+                  {Object.entries(AMBIENT_SOUNDS).map(([key, sound]) => (
+                    <option key={key} value={key}>
+                      {sound.name}
+                    </option>
+                  ))}
+                </select>
+              </div>
+            </label>
+            {!isSupervisorScene && (
+              <p className="env-note">
+                Non-supervisor scenes log violations silently (no shoot FX).
+              </p>
+            )}
           </div>
 
           <div className="dashboard-logs">
@@ -586,14 +949,14 @@ function App() {
           <p>AI-Proctored Focus Sessions</p>
 
           <div className="focus-mode-row" role="group" aria-label="Focus mode">
-            <label className={`mode-option${focusMode === 'countdown' ? ' mode-option--active' : ''}`}>
+            <label className={`mode-option${focusMode === 'pomodoro' ? ' mode-option--active' : ''}`}>
               <input
                 type="radio"
                 name="focusMode"
-                value="countdown"
-                checked={focusMode === 'countdown'}
+                value="pomodoro"
+                checked={focusMode === 'pomodoro'}
                 disabled={isFocusing}
-                onChange={() => setFocusMode('countdown')}
+                onChange={() => handleFocusModeChange('pomodoro')}
               />
               Pomodoro Mode (25 Min)
             </label>
@@ -604,11 +967,48 @@ function App() {
                 value="stopwatch"
                 checked={focusMode === 'stopwatch'}
                 disabled={isFocusing}
-                onChange={() => setFocusMode('stopwatch')}
+                onChange={() => handleFocusModeChange('stopwatch')}
               />
               Stopwatch Mode
             </label>
+            <label className={`mode-option${focusMode === 'custom' ? ' mode-option--active' : ''}`}>
+              <input
+                type="radio"
+                name="focusMode"
+                value="custom"
+                checked={focusMode === 'custom'}
+                disabled={isFocusing}
+                onChange={() => handleFocusModeChange('custom')}
+              />
+              Custom Mode
+            </label>
           </div>
+
+          {focusMode === 'custom' && (
+            <div className="custom-mode-field">
+              <label className="custom-mode-label" htmlFor="custom-minutes">
+                Duration
+              </label>
+              <div className="custom-minutes-wrap">
+                <input
+                  id="custom-minutes"
+                  type="number"
+                  className="custom-minutes-input"
+                  min={0}
+                  max={999}
+                  step={1}
+                  placeholder="Minutes"
+                  value={customMinutes}
+                  disabled={isFocusing}
+                  onChange={handleCustomMinutesChange}
+                  aria-label="Custom focus duration in minutes"
+                />
+                <span className="custom-minutes-suffix" aria-hidden="true">
+                  min
+                </span>
+              </div>
+            </div>
+          )}
 
           <div className="start-row">
             {!isFocusing ? (
@@ -631,8 +1031,8 @@ function App() {
             )}
             {!isFocusing && (
               <span className="start-hint">
-                Camera and phone detection start after you click Start Focus. Pomodoro sessions
-                end automatically when the timer reaches zero.
+                Camera and phone detection start after you click Start Focus. Pomodoro and
+                custom countdown sessions end automatically when the timer reaches zero.
               </span>
             )}
           </div>
@@ -709,6 +1109,37 @@ function App() {
                   onClick={handleConfirmEndFocus}
                 >
                   End Session
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {showCompletionModal && (
+          <div
+            className="modal-overlay modal-overlay--completion"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="completion-modal-title"
+          >
+            <div
+              className="modal-card modal-card--completion"
+              onClick={(e) => e.stopPropagation()}
+            >
+              <h2 id="completion-modal-title" className="modal-title modal-title--completion">
+                Time&apos;s Up! ⏱️
+              </h2>
+              <p className="modal-message">
+                Great job! You have successfully completed your focus session. It&apos;s time to
+                take a well-deserved break!
+              </p>
+              <div className="modal-actions modal-actions--completion">
+                <button
+                  type="button"
+                  className="modal-btn modal-btn--completion"
+                  onClick={handleDismissCompletionModal}
+                >
+                  Got it, Rest Now
                 </button>
               </div>
             </div>
