@@ -1,16 +1,47 @@
-# React + Vite
+# 👁️ Cyber-Proctor
 
-This template provides a minimal setup to get React working in Vite with HMR and some ESLint rules.
+> An immersive, AI-proctored focus dashboard designed to help people—especially individuals with **ADHD**—sustain deep attention through interactive computer vision, customized sensory isolation, and tech-noir aesthetics.
 
-Currently, two official plugins are available:
+---
 
-- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Oxc](https://oxc.rs)
-- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/)
+## 💡 Inspiration & Motivation
 
-## React Compiler
+Standard productivity apps often fail those who struggle with executive dysfunction or ADHD, offering little immediate feedback to combat distractions. **Cyber-Proctor** re-imagines focus sessions by combining client-side AI monitoring with immersive gamification. 
 
-The React Compiler is not enabled on this template because of its impact on dev & build performances. To add it, see [this documentation](https://react.dev/learn/react-compiler/installation).
+By delivering instant multi-sensory feedback (visual shifts and tactical audio cues) upon distraction, it provides the external guardrails needed to re-engage the brain, breaking the cycle of casual phone-scrolling while wrapped in a highly tailored, satisfying visual experience.
 
-## Expanding the ESLint configuration
+---
 
-If you are developing a production application, we recommend using TypeScript with type-aware lint rules enabled. Check out the [TS template](https://github.com/vitejs/vite/tree/main/packages/create-vite/template-react-ts) for information on how to integrate TypeScript and [`typescript-eslint`](https://typescript-eslint.io) in your project.
+## ✨ Current Features
+
+* **📱 Local AI Phone Detection (`COCO-SSD`)**: Uses an on-device TensorFlow.js model to scan your camera feed and detect `cell phone` usage in real-time. 
+* **🔒 Privacy-First Sandbox**: 100% of the computer vision modeling runs completely within your local browser. **No camera data or video feeds are ever uploaded to any server.** * **🎧 Decoupled Sensory Environments**: Toggle independently between high-fidelity looping video backgrounds (Cyber Supervisor, Window Rain, Fireplace) and ambient white noise choices to create your ideal focus sanctuary.
+* **⏱️ Flexible Clock Tri-Mode**: Supports standard 25-min Pomodoro countdowns, traditional stopwatches, and fluid, fully adjustable custom countdown inputs.
+* **🚨 Responsive Completion Modal**: Blocks the screen on session end with a premium glassmorphic overlay, forcing a manual close to guarantee a well-deserved, mindful break.
+
+---
+
+## 🛠️ Tech Stack
+
+* **Frontend**: React.js, Vite, HTML5 Audio/Video API
+* **AI Engine**: `@tensorflow/tfjs`, `@tensorflow-models/coco-ssd`
+* **Styling**: Cyberpunk-inspired Glassmorphism via advanced CSS3 backdrop filters
+
+---
+
+## 🗺️ Future Roadmap (Upcoming Highlights)
+
+We are constantly working to turn Cyber-Proctor into the ultimate focusing universe. Here is what's coming next:
+
+* [ ] **AI-Driven Animated Supervisors**: Allow users to upload a single photo of any supervisor (a mentor, celebrity, or historical figure) and use client-side generative AI to animate their expressions/movements.
+* [ ] **Custom Media Uploads**: Let users drag and drop their own ambient looping videos or custom background tracks.
+* [ ] **Gamified Scenario Punishments**: Expand the reward/punishment animations (e.g., a classroom theme where a teacher turns around and aggressively taps the blackboard upon phone detection).
+* [ ] **Camera Toggle Freedom**: Allow users to optionally hide the live webcam preview widget into a compact background toggle without interrupting the AI proctoring backend.
+
+---
+
+## 🚀 Quick Start (Local Setup)
+
+1. Clone the repository:
+   ```bash
+   git clone [https://github.com/CCCerseiii/Cyber-Proctor.git](https://github.com/CCCerseiii/Cyber-Proctor.git)
