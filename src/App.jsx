@@ -20,28 +20,28 @@ const DEFAULT_COUNTDOWN_SEC = 25 * 60
 const VISUAL_SCENES = {
   supervisor: {
     name: 'Cyber Supervisor (Default)',
-    patrolVideoSrc: 'officer_patrol.mp4',
-    punishmentVideoSrc: 'officer_shoot.mp4',
+    patrolVideoSrc: '/officer_patrol.mp4',
+    punishmentVideoSrc: '/officer_shoot.mp4',
   },
   fireplace: {
     name: 'Cozy Fireplace',
-    videoSrc: 'fireplace.mp4',
+    videoSrc: '/fireplace.mp4',
   },
   rain: {
     name: 'Window Rain',
-    videoSrc: 'rain.mp4',
+    videoSrc: '/rain.mp4',
   },
   rainforest: {
     name: 'Cyber Rainforest',
-    videoSrc: 'rainforest.mp4',
+    videoSrc: '/rainforest.mp4',
   },
   classroom: {
     name: 'Study Classroom',
-    videoSrc: 'classroom.mp4',
+    videoSrc: '/classroom.mp4',
   },
   library: {
     name: 'Quiet Library',
-    videoSrc: 'library.mp4',
+    videoSrc: '/library.mp4',
   },
 }
 
@@ -54,12 +54,12 @@ const SUPERVISOR_SHOOT_VIDEO_SRC = assetUrl(
 
 const AMBIENT_SOUNDS = {
   none: { name: 'None', audioSrc: null },
-  white: { name: 'Pure White Noise', audioSrc: 'white-noise.mp3' },
+  white: { name: 'Pure White Noise', audioSrc: '/white-noise.mp3' },
   fireplace: {
     name: 'Fireplace Crackling',
-    audioSrc: 'fireplace-noise.mp3',
+    audioSrc: '/fireplace-noise.mp3',
   },
-  rain: { name: 'Deep Rain Comfort', audioSrc: 'rain-noise.mp3' },
+  rain: { name: 'Deep Rain Comfort', audioSrc: '/rain-noise.mp3' },
 }
 
 function isAbortLikeError(err) {
